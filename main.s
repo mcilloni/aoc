@@ -4,11 +4,10 @@
 alloc:
     // x0 is the amount required (will be rounded up to 4096B pages)
     // returns the pointer to the allocated memory in x0
-    // this incantation is the good old logic to perform integer div by a constant (10 in this case)
     tst  x0, #0xFFF // check if the number is a multiple of 4096
     cset w1, ne    // set x1 to 1 if the number is not a multiple of 4096
     and  x0, x0, #0xFFFFFFFFFFFFF000 // round down to a multiple of 4096
-    add  x1, x1, x0, lsl #12 // add one, if the number was not a multiple of 4096. this is mmap's length
+    add  x1, x0, x1, lsl #12 // add 4096, if the number was not a multiple of 4096. this is mmap's length
     mov  x8, #222      // mmap syscall
     mov  x0, xzr       // addr = NULL
     mov  x2, #0b011    // prot = PROT_READ(1) | PROT_WRITE(2)
@@ -295,8 +294,8 @@ _start:
     bl  print_fail
 
 _start.file_opened:
-    str x0, [sp, #-16]! // store the file descriptor on the stack (and realign sp)
     mov x29, sp // set the frame pointer to the stack pointer
+    str x0, [sp, #-16]! // store the file descriptor on the stack + reserve 8 bytes for the count from count_chunks
 
 //     sub sp, sp, #544 // reserve 512 bytes for the buffer + 32 bytes for shenanigans
 // _start.read_chunk:
@@ -324,24 +323,26 @@ _start.file_opened:
     bl count_chunks
     cmp x0, #0
     b.lt _start.done
+    str x0, [x29, #-8] // store the count in the hole we left on the stack
 
-    sub sp, sp, #32
-    mov x1, sp
-    mov x2, #32
-    bl ulltoa
+    lsl x0, x0, #3 // allocate 8*count bytes (8 bytes per word)
+    bl   alloc
+    cbnz x0, _start.alloc_ok
 
-    mov x0, sp
-    mov x1, x2
-    bl println
-    add sp, sp, #32
+    adr x0, alloc_fail
+    mov x1, alloc_fail_len
+    bl  print_fail    
 
-    ldr x0, [x29] // the file descriptor
+_start.alloc_ok:
+    str x0, [sp, #-16]! // store the buffer on the stack (FP - 32)
+
+    ldr x0, [x29, #-16] // rewind the file descriptor
     bl  rewind
 
 _start.done:
     str x0, [sp, #-16]! // store the return value on the stack 
 
-    ldr x0, [x29] // the file descriptor
+    ldr x0, [x29, #-16] // the file descriptor
     bl  close
     
     ldr x0, [sp], #16 // restore the return value
@@ -357,21 +358,25 @@ _start.quit:
 
 .section .rodata
 
+alloc_fail:
+    .ascii "Failed to allocate memory\n"
+    .equ alloc_fail_len, . - alloc_fail
+
 blanks:
     .asciz " \t\n\r"
+
+io_fail:
+    .ascii "IO error\n"
+    .equ io_fail_len, . - io_fail
 
 newline:
     .ascii "\n"
     .equ newline_len, . - newline
 
-usage:
-    .ascii "Usage: 01 INPUT\n"
-    .equ usage_len, . - usage
-
 open_fail:
     .ascii "Failed to open file\n"
     .equ open_fail_len, . - open_fail
 
-io_fail:
-    .ascii "IO error\n"
-    .equ io_fail_len, . - io_fail
+usage:
+    .ascii "Usage: 01 INPUT\n"
+    .equ usage_len, . - usage
