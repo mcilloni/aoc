@@ -224,6 +224,32 @@ read_cnk.fail:
 read_cnk.end:
     ret
 
+read_u64:
+    // x0 is the file descriptor
+    // returns the number in x0, and 1 in x1 on EOF, 0 on success, negative on error
+    stp x29, lr, [sp, #-16]! // store fp and lr to the stack
+    mov x29, sp // set the frame pointer to the stack pointer
+    sub sp, sp, #32 // 32 bytes for the buffer
+    mov x1, sp // A u64 is max 20 chars, so we're good
+    mov x2, #32
+    bl read_cnk
+    cmp x0, #0
+    b.lt read_u64.fail // if x0 is negative, it's an error
+    cset w1, eq // set w1 to 1 if EOF
+    cbz  x0, read_u64.done // EOF, we read nothing, exit
+    mov x1, x0 // set x1 to the length of the string
+    sub x0, x29, #32 // load the buffer
+    bl atoull
+    mov x1, xzr // clear x1 just in case
+    cbnz x0, read_u64.done // if x0 is not zero, we're good
+    mov x0, #-1 // we assume that 0 is an error. May be stupid
+read_u64.fail:
+    mov x1, x0 // set x1 to the error code
+read_u64.done:
+    add sp, sp, #32    // restore the stack
+    ldp x29, lr, [sp], #16 // restore lr and old fp
+    ret
+
 rewind:
     // x0 is the file descriptor
     mov x1, xzr // offset = 0
@@ -297,29 +323,6 @@ _start.file_opened:
     mov x29, sp // set the frame pointer to the stack pointer
     str x0, [sp, #-16]! // store the file descriptor on the stack + reserve 8 bytes for the count from count_chunks
 
-//     sub sp, sp, #544 // reserve 512 bytes for the buffer + 32 bytes for shenanigans
-// _start.read_chunk:
-//     ldr  x0, [x29] // load the file descriptor
-//     sub  x1, x29, 512 // set x1 to the buffer
-//     mov  x2, #512 // set x2 to the length of the buffer
-//     bl   read_cnk
-//     cmp  x0, #0
-//     b.le _start.done
-
-//     mov x1, x0 // the length of the chunk 
-//     sub x0, x29, #512 // the buffer 
-//     bl  atoull
-
-//     mov x1, sp // the buffer for the bad stuff
-//     mov x2, #32 // the length of the buffer
-//     bl  ulltoa 
-
-//    mov x0, sp
-//    mov x1, x2
-//    bl  println
-//
-//    b   _start.read_chunk // read the next chunk
-
     bl count_chunks
     cmp x0, #0
     b.lt _start.done
@@ -334,10 +337,36 @@ _start.file_opened:
     bl  print_fail    
 
 _start.alloc_ok:
-    str x0, [sp, #-16]! // store the buffer on the stack (FP - 32)
+    str x0, [sp, #-16]! // store the buffer on the stack (FP - 32) + an iterator
+    ldr x1, [x29, #-8]  // load the count
+    lsl x1, x1, #3      // len * sizeof(u64)
+    add x1, x0, x1      // calculate the end of the buffer
+    stp x0, x1, [sp, #-16]! // store the buffer again (iterator) + the end of the buffer
+    sub sp, sp, #32 // shenanigans
 
     ldr x0, [x29, #-16] // rewind the file descriptor
     bl  rewind
+_start.read_uint:
+    ldr  x0, [x29, #-16] // load the file descriptor
+    bl   read_u64
+    cmp  x1, #0
+    b.gt _start.done
+    b.eq _start.read_ok
+
+    adr x0, io_fail
+    mov x1, io_fail_len
+    bl  print_fail
+
+_start.read_ok:
+    sub x1, x29, #80
+    mov x2, #32
+    bl ulltoa
+
+    sub x0, x29, #80
+    mov x1, x2
+    bl   println
+
+    b   _start.read_uint // read the next chunk
 
 _start.done:
     str x0, [sp, #-16]! // store the return value on the stack 
