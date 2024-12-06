@@ -1,6 +1,28 @@
 .text
 .globl _start
 
+alloc:
+    // x0 is the amount required (will be rounded up to 4096B pages)
+    // returns the pointer to the allocated memory in x0
+    // this incantation is the good old logic to perform integer div by a constant (10 in this case)
+    tst  x0, #0xFFF // check if the number is a multiple of 4096
+    cset w1, ne    // set x1 to 1 if the number is not a multiple of 4096
+    and  x0, x0, #0xFFFFFFFFFFFFF000 // round down to a multiple of 4096
+    add  x1, x1, x0, lsl #12 // add one, if the number was not a multiple of 4096. this is mmap's length
+    mov  x8, #222      // mmap syscall
+    mov  x0, xzr       // addr = NULL
+    mov  x2, #0b011    // prot = PROT_READ(1) | PROT_WRITE(2)
+    mov  x3, #0b100010 // flags = MAP_PRIVATE(2) | MAP_ANONYMOUS(32)
+    mov  x4, #-1       // fd = -1
+    mov  x5, #0        // offset = 0
+    svc  #0
+    cmp  x0, #-1       // MAP_FAILED
+    b.eq alloc.fail
+    ret
+alloc.fail:
+    mov x0, xzr        // return NULL
+    ret
+
 atoull:
     // x0 is the pointer to the string
     // x1 is the length of the string
@@ -25,6 +47,40 @@ close:
     // expect file descriptor in x0
     mov x8, #57 // close syscall
     svc #0
+    ret
+
+count_chunks:
+    // x0 is the file descriptor
+    // returns the number of chunks in x0, or negative on error
+    stp x29, lr, [sp, #-16]! // store fp and lr to the stack
+    mov x29, sp // set the frame pointer to the stack pointer
+    stp xzr, xzr, [sp, #-16]! // `in_chunk` flag(1B) + pad + counter(8B)
+    str x0, [sp, #-16]! // store the file descriptor on the stack (and realign sp)
+count_chunks.loop:
+    bl   read_byte
+    cmp  x1, #0
+    b.lt count_chunks.fail // x1 < 0, error
+    b.gt count_chunks.done // x1 > 0, EOF
+    bl   is_blank // check if the byte is a blank
+    ldp  x1, x2, [x29, #-16] // load `in_chunk` and counter
+    orr  x3, x0, x1
+    cmp  x3, #0 // blank NOR in_chunk - if it's not a blank and we're not in a chunk, we're starting a new chunk
+    cset x3, eq 
+    add  x2, x2, x3 // increment the counter if we're starting a new chunk
+    cmp  x0, #0     // !is_blank -> in_chunk
+    cset x3, eq     // set in_chunk to 1 if we're not in a blank
+    stp  x3, x2, [x29, #-16] // store `in_chunk` and counter
+    ldr  x0, [x29, #-32] // load the file descriptor for the next iteration
+    b    count_chunks.loop
+count_chunks.fail:
+    mov x0, x1 // set x0 to the error code
+    add sp, sp, #32 // discard the current frame 
+    b   count_chunks.end
+count_chunks.done:
+    add sp, sp, #16   // discard the fd
+    ldp xzr, x0, [sp], #16 // load the counter
+count_chunks.end:
+    ldp x29, lr, [sp], #16 // restore fp and lr
     ret
 
 is_blank:
@@ -195,9 +251,10 @@ ulltoa.loop:
     b ulltoa.loop
 ulltoa.break:
     sub x2, x3, x4 // store the string length before messing up the registers
+    sub x2, x2, #1 // sub 1 for the null terminator
     // now memmove the string to the beginning of the buffer. Note that this implementation is not efficient at all
 ulltoa.moveback:
-    ldrb w6, [x4], #1 // load the first character
+    ldrb w6, [x4, #1]! // load the first character
     strb w6, [x1], #1 // store it at the beginning
     cmp x4, x3
     b.lt ulltoa.moveback
@@ -232,28 +289,45 @@ _start:
 _start.file_opened:
     str x0, [sp, #-16]! // store the file descriptor on the stack (and realign sp)
     mov x29, sp // set the frame pointer to the stack pointer
-    sub sp, sp, #544 // reserve 512 bytes for the buffer + 32 bytes for shenanigans
-_start.read_chunk:
-    ldr  x0, [x29] // load the file descriptor
-    sub  x1, x29, 512 // set x1 to the buffer
-    mov  x2, #512 // set x2 to the length of the buffer
-    bl   read_cnk
-    cmp  x0, #0
-    b.le _start.done
 
-    mov x1, x0 // the length of the chunk 
-    sub x0, x29, #512 // the buffer 
-    bl  atoull
+//     sub sp, sp, #544 // reserve 512 bytes for the buffer + 32 bytes for shenanigans
+// _start.read_chunk:
+//     ldr  x0, [x29] // load the file descriptor
+//     sub  x1, x29, 512 // set x1 to the buffer
+//     mov  x2, #512 // set x2 to the length of the buffer
+//     bl   read_cnk
+//     cmp  x0, #0
+//     b.le _start.done
 
-    mov x1, sp // the buffer for the bad stuff
-    mov x2, #32 // the length of the buffer
-    bl  ulltoa 
+//     mov x1, x0 // the length of the chunk 
+//     sub x0, x29, #512 // the buffer 
+//     bl  atoull
+
+//     mov x1, sp // the buffer for the bad stuff
+//     mov x2, #32 // the length of the buffer
+//     bl  ulltoa 
+
+//    mov x0, sp
+//    mov x1, x2
+//    bl  println
+//
+//    b   _start.read_chunk // read the next chunk
+
+    bl count_chunks
+    cmp x0, #0
+    b.lt _start.done
+
+    sub sp, sp, #32
+    mov x1, sp
+    mov x2, #32
+    bl ulltoa
 
     mov x0, sp
     mov x1, x2
-    bl  println
+    bl println
+    add sp, sp, #32
 
-    b   _start.read_chunk // read the next chunk
+    mov x0, xzr
 
 _start.done:
     str x0, [sp, #-16]! // store the return value on the stack 
