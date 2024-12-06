@@ -225,6 +225,14 @@ read_cnk.fail:
 read_cnk.end:
     ret
 
+rewind:
+    // x0 is the file descriptor
+    mov x1, xzr // offset = 0
+    mov x2, xzr // whence = SEEK_SET (0)
+    mov x8, #62 // lseek syscall
+    svc #0
+    ret
+
 ulltoa:
     // x0 is a number
     // x1 is the pointer to the buffer
@@ -327,7 +335,8 @@ _start.file_opened:
     bl println
     add sp, sp, #32
 
-    mov x0, xzr
+    ldr x0, [x29] // the file descriptor
+    bl  rewind
 
 _start.done:
     str x0, [sp, #-16]! // store the return value on the stack 
