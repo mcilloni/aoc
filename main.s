@@ -1,21 +1,28 @@
 .text
 .globl _start
 
+.macro round_to_page dest n
+    // rounds n to the nearest multiple of 4096
+    // clobbers x14, x15
+    mov  x14, \n
+    tst  x14, #0xFFF // check if the number is a multiple of 4096
+    cset w15, ne     // set x1 to 1 if the number is not a multiple of 4096
+    and  x14, x14, #0xFFFFFFFFFFFFF000 // round down to a multiple of 4096
+    add  \dest, x14, x15, lsl #12 // add 4096, if the number was not a multiple of 4096. this is mmap's length
+.endmacro
+
 alloc:
     // x0 is the amount required (will be rounded up to 4096B pages)
-    // returns the pointer to the allocated memory in x0
-    tst  x0, #0xFFF // check if the number is a multiple of 4096
-    cset w1, ne    // set x1 to 1 if the number is not a multiple of 4096
-    and  x0, x0, #0xFFFFFFFFFFFFF000 // round down to a multiple of 4096
-    add  x1, x0, x1, lsl #12 // add 4096, if the number was not a multiple of 4096. this is mmap's length
-    mov  x8, #222      // mmap syscall
-    mov  x0, xzr       // addr = NULL
-    mov  x2, #0b011    // prot = PROT_READ(1) | PROT_WRITE(2)
-    mov  x3, #0b100010 // flags = MAP_PRIVATE(2) | MAP_ANONYMOUS(32)
-    mov  x4, #-1       // fd = -1
-    mov  x5, #0        // offset = 0
+    // returns the pointer to the allocated memory in x0 and the map size in x1
+    round_to_page x1, x0 // round x0 to the nearest multiple of 4096 and store it in x1
+    mov  x8, #222        // mmap syscall
+    mov  x0, xzr         // addr = NULL
+    mov  x2, #0b011      // prot = PROT_READ(1) | PROT_WRITE(2)
+    mov  x3, #0b100010   // flags = MAP_PRIVATE(2) | MAP_ANONYMOUS(32)
+    mov  x4, #-1         // fd = -1
+    mov  x5, #0          // offset = 0
     svc  #0
-    cmp  x0, #-1       // MAP_FAILED
+    cmp  x0, #-1         // MAP_FAILED
     b.eq alloc.fail
     ret
 alloc.fail:
@@ -27,19 +34,20 @@ atoull:
     // x1 is the length of the string
     // returns the number in x0, or 0 on error
     add x2, x0, x1 // calculate the end of the string
+    mov x5, x1     // save the length
     mov x1, x0     // use x1 as iterator
     mov x0, xzr    // clear x0
+    cbz x5, atoull.quit // if the string is empty, we're done
     mov x4, #10    // base 10
 atoull.loop:
-    cmp x1, x2
-    b.ge atoull.fail // if we're at the end of the string, we're done
     ldrb w3, [x1], #1 // load the byte and increment the pointer
     sub w3, w3, #'0'  // check if it's a digit
     cmp w3, 10
-    b.cs atoull.fail  // if the char is between ['0', '10'], (w3 - '0') < 10. Note, unsigned flag (carry set)
+    b.cs atoull.quit  // if the char is between ['0', '10'], (w3 - '0') < 10. Note, unsigned flag (carry set)
     madd x0, x0, x4, x3 // x0 = x0 * 10 + x3
-    b atoull.loop
-atoull.fail:
+    cmp x1, x2
+    b.lo atoull.loop // if we're at the end of the string, we're done
+atoull.quit:
     ret
 
 close:
@@ -47,6 +55,22 @@ close:
     mov x8, #57 // close syscall
     svc #0
     ret
+
+.macro copy64 dst src n
+    // copies n bytes from src to dst in 64 bit chunks. n must be a multiple of 8 for _obvious_ reasons
+    mov  x10, dst
+    mov  x11, src
+    add  x12, x11, n
+    cmp  x11, x12
+    b.hs copy64.quit\@
+copy64.loop\@:
+    ldp  x13, x14, [x11], #16
+    stp  x13, x14, [x10], #16
+    cmp  x11, x12
+    b.lo copy64.loop\@
+copy64.quit\@:
+    
+.endmacro
 
 count_chunks:
     // x0 is the file descriptor
@@ -82,6 +106,29 @@ count_chunks.end:
     ldp x29, lr, [sp], #16 // restore fp and lr
     ret
 
+grow_map:
+    // x0 is the pointer to old buffer (or NULL)
+    // x1 is the old size (mmapped)
+    // x2 is the new size (will be rounded to next map)
+    // returns the pointer to the new buffer in x0, and the allocated size in x1, or NULL on error
+    cbnz x0, grow_map.mremap // if we have a mapping, we have to remap
+    mov  x0, x2              // set x0 to the new size
+    b   alloc                // tail call into alloc. We don't need to link, just jump
+grow_map.mremap:
+    round_to_page x2, x2 // round x2 to the nearest multiple of 4096
+    cmp  x1, x2
+    b.hs grow_map.quit // we don't support shrinking
+    mov  x8, #216       // mremap syscall
+    mov  x3, #1         // flags = MREMAP_MAYMOVE
+    svc  #0
+    cmp  x0, #-1
+    cset x4, eq        // set x4 to 1 if x0 == -1
+    add  x0, x0, x4    // set x0 to NULL if x0 == -1 (error)
+    b.eq grow_map.quit // quit now if x0 was -1
+    mov  x1, x2        // set x1 to the new size
+grow_map.quit:
+    ret
+
 is_blank:
     // x0 is a character
     // returns x0 == 1 if the character is a blank, 0 otherwise
@@ -98,7 +145,22 @@ is_blank.not_blank:
 is_blank.quit:
     ret
 
+munmap:
+    // x0 is the pointer to the memory previously mmap'd
+    // x1 is the size of the chunk (should be a multiple of 4096 if allocated with alloc)
+    // returns 0 on success, negative on error
+    cmp  x0, #0
+    ccmp x1, #0, #0b0100, ne // if x0 != 0, cmp x1. If x1 != 0, set flags to 0b0100 (zero flag set)
+    b.eq munmap.quit // if !(x0 && x1), quit 
+    mov  x8, #215 // munmap syscall
+    svc  #0
+munmap.quit:
+    ret
+
 open:
+    // x0 is the path
+    // returns the file descriptor in x0, or negative on error
+    // note: always opens files in read-only mode (O_RDONLY)
     mov x8, #56   // openat, no open on aarch64
     mov x1, x0    // path
     mov x2, #0    // O_RDONLY
@@ -144,6 +206,57 @@ quit:
     mov x8, #93
     svc #0
     // process is dead
+
+parse_input:
+    // x0 is the file descriptor
+    // returns the pointer to the buffer in x0, the capacity in x1, and the length in x2
+    // on error returns x0 = -1 for IO error, x0 = 0 for memory allocation error, x0 = -2 for malformed input
+    stp x29, lr, [sp, #-16]! // store fp and lr to the stack
+    mov x29, sp // set the frame pointer to the stack pointer
+    stp xzr, xzr, [sp, #-16]!  // `len` (FP - 16) + `new_int` (FP - 8)
+    stp xzr, xzr, [sp, #-16]! // `array` (FP - 32) + `cap` (FP - 24)
+    str x0, [sp, #-16]!       // `fd` (FP - 48)
+
+parse_input.next_num:
+    bl   read_u64
+    cmp  x1, #0
+    b.gt parse_input.done // EOF
+    b.eq parse_input.read_ok
+    mov x0, #-1 // IO error
+    b   parse_input.quit
+
+parse_input.read_ok:
+    str x0, [x29, #-8] // store the number in temporary variable
+    ldp x0, x1, [x29, #-32] // load array and cap
+    ldr x2, [x29, #-16]    // load len
+    cmp x2, x1
+    b.lo parse_input.store_u64
+    add x1, x1, x1 // double the capacity, almost definitely stupid
+    bl  grow_map
+    cbnz x0, parse_input.save_newarr
+    
+    ldp x0, x1, [x29, #-32] // load previous array and cap to unmap the buffer
+    bl munmap
+    mov x0, #0 // memory allocation error
+    b   parse_input.quit
+
+parse_input.save_newarr:
+    stp x0, x1, [x29, #-32] // store the new array and cap
+parse_input.store_u64:
+    ldp x2, x3, [x29, #-16] // load len and new_int
+    add x0, x0, x2 // move cursor to current position
+    str x3, [x0]   // store the number and increment the pointer
+    add x2, x2, #8 // increment the length of sizeof(u64)
+    str x2, [x29, #-16] // store the new length
+    ldr x0, [x29, #-48] // load the file descriptor
+    b   parse_input.next_num // read the next chunk
+parse_input.done: // successful termination
+    ldp x0, x1, [x29, #-32] // load the array and cap
+    ldr x2, [x29, #-16]     // load len 
+parse_input.quit:
+    add sp, sp, #48 // discard the current frame
+    ldp x29, lr, [sp], #16 // restore fp and lr
+    ret
 
 read:
     // x0 is the file descriptor
@@ -193,7 +306,7 @@ read_cnk:
     strb wzr, [sp, #1]      // This bool represents if the code is building a chunk (t) or else if it's still skipping blanks (f)
 read_cnk.next_byte:
     cmp x1, x2
-    b.ge read_cnk.done
+    b.hs read_cnk.done
     ldr x0, [x29, #-32] // load the file descriptor
     bl read_byte
     cmp x1, #0
@@ -268,9 +381,9 @@ ulltoa:
     sub x4, x3, #1 // reverse iterator for the buffer
     strb wzr, [x4], #-1 // null-terminate the string
     mov x9, #10    // base 10
-ulltoa.loop:
+ulltoa.loop: // I know that checking loop conditions at the beginning is for n00bs, but I'm a n00b
     cmp x4, x1
-    b.lt ulltoa.break // if we're at the start of the buffer, we're done with what we have
+    b.lo ulltoa.break // if we're at the start of the buffer, we're done with what we have
     // this incantation is the good old logic to perform integer div by a constant (10 in this case)
     mov     x5, x0                          // x5 = x0
     mov     x8, #-3689348814741910324       // =0xcccccccccccccccc
@@ -290,7 +403,7 @@ ulltoa.moveback:
     ldrb w6, [x4, #1]! // load the first character
     strb w6, [x1], #1 // store it at the beginning
     cmp x4, x3
-    b.lt ulltoa.moveback
+    b.lo ulltoa.moveback
 ulltoa.exit:
     ret
 
