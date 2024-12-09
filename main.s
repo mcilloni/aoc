@@ -169,6 +169,59 @@ open:
     svc #0
     ret
 
+parse_input:
+    // x0 is the file descriptor
+    // returns the pointer to the buffer in x0, the capacity in x1, and the length in x2
+    // on error returns x0 = -1 for IO error, x0 = 0 for memory allocation error, x0 = -2 for malformed input
+    stp x29, lr, [sp, #-16]! // store fp and lr to the stack
+    mov x29, sp // set the frame pointer to the stack pointer
+    stp xzr, xzr, [sp, #-16]!  // `len` (FP - 16) + `new_int` (FP - 8)
+    stp xzr, xzr, [sp, #-16]! // `array` (FP - 32) + `cap` (FP - 24)
+    str x0, [sp, #-16]!       // `fd` (FP - 48)
+
+parse_input.next_num:
+    bl   read_u64
+    cmp  x1, #0
+    b.gt parse_input.done // EOF
+    b.eq parse_input.read_ok
+    mov x0, #-1 // IO error
+    b   parse_input.quit
+
+parse_input.read_ok:
+    str x0, [x29, #-8] // store the number in temporary variable
+    ldp x0, x1, [x29, #-32] // load array and cap
+    ldr x2, [x29, #-16]    // load len
+    cmp x2, x1
+    b.lo parse_input.store_u64
+    // add a 4k page, almost certainly bad. A better logic would be to multiply by 2, probably
+    // ..but then I'd have to handle the 0 case, so ¯\_(ツ)_/¯
+    add x2, x1, #4096
+    bl  grow_map
+    cbnz x0, parse_input.save_newarr
+    
+    ldp x0, x1, [x29, #-32] // load previous array and cap to unmap the buffer
+    bl munmap
+    mov x0, #0 // memory allocation error
+    b   parse_input.quit
+
+parse_input.save_newarr:
+    stp x0, x1, [x29, #-32] // store the new array and cap
+parse_input.store_u64:
+    ldp x2, x3, [x29, #-16] // load len and new_int
+    add x0, x0, x2 // move cursor to current position
+    str x3, [x0]   // store the number and increment the pointer
+    add x2, x2, #8 // increment the length of sizeof(u64)
+    str x2, [x29, #-16] // store the new length
+    ldr x0, [x29, #-48] // load the file descriptor
+    b   parse_input.next_num // read the next chunk
+parse_input.done: // successful termination
+    ldp x0, x1, [x29, #-32] // load the array and cap
+    ldr x2, [x29, #-16]     // load len 
+parse_input.quit:
+    add sp, sp, #48 // discard the current frame
+    ldp x29, lr, [sp], #16 // restore fp and lr
+    ret
+
 print:
     mov x2, x1
     mov x1, x0
@@ -207,57 +260,6 @@ quit:
     svc #0
     // process is dead
 
-parse_input:
-    // x0 is the file descriptor
-    // returns the pointer to the buffer in x0, the capacity in x1, and the length in x2
-    // on error returns x0 = -1 for IO error, x0 = 0 for memory allocation error, x0 = -2 for malformed input
-    stp x29, lr, [sp, #-16]! // store fp and lr to the stack
-    mov x29, sp // set the frame pointer to the stack pointer
-    stp xzr, xzr, [sp, #-16]!  // `len` (FP - 16) + `new_int` (FP - 8)
-    stp xzr, xzr, [sp, #-16]! // `array` (FP - 32) + `cap` (FP - 24)
-    str x0, [sp, #-16]!       // `fd` (FP - 48)
-
-parse_input.next_num:
-    bl   read_u64
-    cmp  x1, #0
-    b.gt parse_input.done // EOF
-    b.eq parse_input.read_ok
-    mov x0, #-1 // IO error
-    b   parse_input.quit
-
-parse_input.read_ok:
-    str x0, [x29, #-8] // store the number in temporary variable
-    ldp x0, x1, [x29, #-32] // load array and cap
-    ldr x2, [x29, #-16]    // load len
-    cmp x2, x1
-    b.lo parse_input.store_u64
-    add x1, x1, x1 // double the capacity, almost definitely stupid
-    bl  grow_map
-    cbnz x0, parse_input.save_newarr
-    
-    ldp x0, x1, [x29, #-32] // load previous array and cap to unmap the buffer
-    bl munmap
-    mov x0, #0 // memory allocation error
-    b   parse_input.quit
-
-parse_input.save_newarr:
-    stp x0, x1, [x29, #-32] // store the new array and cap
-parse_input.store_u64:
-    ldp x2, x3, [x29, #-16] // load len and new_int
-    add x0, x0, x2 // move cursor to current position
-    str x3, [x0]   // store the number and increment the pointer
-    add x2, x2, #8 // increment the length of sizeof(u64)
-    str x2, [x29, #-16] // store the new length
-    ldr x0, [x29, #-48] // load the file descriptor
-    b   parse_input.next_num // read the next chunk
-parse_input.done: // successful termination
-    ldp x0, x1, [x29, #-32] // load the array and cap
-    ldr x2, [x29, #-16]     // load len 
-parse_input.quit:
-    add sp, sp, #48 // discard the current frame
-    ldp x29, lr, [sp], #16 // restore fp and lr
-    ret
-
 read:
     // x0 is the file descriptor
     // x1 is the pointer to the buffer
@@ -290,7 +292,8 @@ read_byte.quit:
     ldp x29, lr, [sp], #16 // restore fp and lr
     ret
 
-// byte per byte unbuffered reading is super inefficient, but given I'm writing AArch64 assembly I'll take what I can get
+// byte per byte unbuffered reading is massively inefficient, but given I'm writing AArch64 assembly I'll take what I can get
+// the right way is to read a large chunk of data and then process it in memory, but it's too cumbersome for AoC purposes
 read_cnk:
     // x0 is the file descriptor
     // x1 is the pointer to the buffer
@@ -416,6 +419,7 @@ write:
     ret
 
 _start:
+    mov x29, sp // set the frame pointer to the stack pointer
     // handle wrong number of arguments
     ldr  x0, [sp] // argc
     cmp  x0, #2
@@ -433,69 +437,58 @@ _start:
     bl  print_fail
 
 _start.file_opened:
-    mov x29, sp // set the frame pointer to the stack pointer
-    str x0, [sp, #-16]! // store the file descriptor on the stack + reserve 8 bytes for the count from count_chunks
+    // reserve 32 bytes for buffer (-32), capacity (-24), end (-16), and file descriptor/iterator (-8), plus a hefty 32
+    // byte area for the ulltoa buffer (needs 20 anyway)
+    sub sp, sp, #64
+    str x0, [x29, #-8] // store the file descriptor on the stack
 
-    bl count_chunks
+    bl parse_input
     cmp x0, #0
-    b.lt _start.done
-    str x0, [x29, #-8] // store the count in the hole we left on the stack
+    b.hi _start.parse_ok
+    add x3, x0, #2 // errors are -2, -1, 0, add 2 to get 0, 1, 2
+    lsl x3, x3, #3 // multiply by 8 to get the index in the jump table
+    adr x0, jump_table.parse_input.strings
+    ldr x0, [x0, x3] // load the error message
 
-    lsl x0, x0, #3 // allocate 8*count bytes (8 bytes per word)
-    bl   alloc
-    cbnz x0, _start.alloc_ok
-
-    adr x0, alloc_fail
-    mov x1, alloc_fail_len
+    adr x1, jump_table.parse_input.strlens
+    ldr x1, [x1, x3] // load the length of the error message    
     bl  print_fail    
 
-_start.alloc_ok:
-    str x0, [sp, #-16]! // store the buffer on the stack (FP - 32) + an iterator
-    ldr x1, [x29, #-8]  // load the count
-    lsl x1, x1, #3      // len * sizeof(u64)
-    add x1, x0, x1      // calculate the end of the buffer
-    stp x0, x1, [sp, #-16]! // store the buffer again (iterator) + the end of the buffer
-    sub sp, sp, #32 // shenanigans
+_start.parse_ok:
+    add x2, x0, x2 // calculate the end of the buffer
+    str x2, [x29, #-16] // store the end of the buffer
+    stp x0, x1, [x29, #-32] // store the buffer and the capacity
 
-    ldr x0, [x29, #-16] // rewind the file descriptor
-    bl  rewind
-_start.read_uint:
-    ldr  x0, [x29, #-16] // load the file descriptor
-    bl   read_u64
-    cmp  x1, #0
-    b.gt _start.done
-    b.eq _start.read_ok
+    ldr x0, [x29, #-8] // load the file descriptor
+    bl close 
 
-    adr x0, io_fail
-    mov x1, io_fail_len
-    bl  print_fail
+    ldr x4, [x29, #-32] // load the buffer
+    str x4, [x29, #-8] // store the buffer in the file descriptor slot, now it's the iterator
+    ldr x5, [x29, #-16] // load the end of the buffer
 
-_start.read_ok:
-    sub x1, x29, #80
-    mov x2, #32
-    bl ulltoa
+    cmp x4, x5
+    b.hs _start.done // skip loop if unneeded
 
-    sub x0, x29, #80
-    mov x1, x2
-    bl   println
+_start.loop:
+    ldr x0, [x4], #8 // load the number
+    str x4, [x29, #-8] // inc the iterator
+    sub x1, x29, #64 // calculate the buffer start
+    mov x2, #32 // 32 bytes for the ulltoa buffer 
+    bl  ulltoa
 
-    b   _start.read_uint // read the next chunk
+    sub x0, x29, #64 // load the buffer start
+    mov x1, x2 // put the size in x1
+    bl println
+
+    ldp x5, x4, [x29, #-16] // load the end of the buffer and the iterator
+    cmp x4, x5
+    b.lo _start.loop
 
 _start.done:
-    str x0, [sp, #-16]! // store the return value on the stack 
+    ldp x0, x1, [x29, #-32] // load the buffer and the capacity
+    bl munmap
 
-    ldr x0, [x29, #-16] // the file descriptor
-    bl  close
-    
-    ldr x0, [sp], #16 // restore the return value
-    cbz x0, _start.quit
-
-    // print we had an IO error and die
-    adr x0, io_fail
-    mov x1, io_fail_len
-    bl  print_fail
-
-_start.quit:
+    mov x0, #0 // success    
     bl  quit
 
 .section .rodata
@@ -506,6 +499,10 @@ alloc_fail:
 
 blanks:
     .asciz " \t\n\r"
+
+malformed_input:
+    .ascii "Malformed input\n"
+    .equ malformed_input_len, . - malformed_input
 
 io_fail:
     .ascii "IO error\n"
@@ -522,3 +519,13 @@ open_fail:
 usage:
     .ascii "Usage: 01 INPUT\n"
     .equ usage_len, . - usage
+
+jump_table.parse_input.strings:
+    .quad malformed_input
+    .quad io_fail
+    .quad alloc_fail
+
+jump_table.parse_input.strlens:
+    .quad malformed_input_len
+    .quad io_fail_len
+    .quad alloc_fail_len
