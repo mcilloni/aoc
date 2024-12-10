@@ -170,14 +170,23 @@ open:
     ret
 
 parse_input:
-    // x0 is the file descriptor
-    // returns the pointer to the buffer in x0, the capacity in x1, and the length in x2
-    // on error returns x0 = -1 for IO error, x0 = 0 for memory allocation error, x0 = -2 for malformed input
+
+// macro to make this more manageable, clobbers x9 and x10
+.macro parse_input.fetch_slot DESTREG
+    mov x9, #24
+    ldrb w10, [x29, #-32] // load the flag
+    cmp x10, #1
+    csel x10, x9, xzr, eq // if odd is true, pick an offset of 24 second (buffer, cap, len)
+    ldr x9, [x29, #-16] // load the struct
+    add \DESTREG, x9, x10 // add the offset
+.endmacro
+
+    // x0 is the file descriptor, x1 a struct of 6 quads
+    // on error returns x0 = -1 for IO error, x0 = 0 for memory allocation error, x0 = -2 for malformed input. 1 if OK
     stp x29, lr, [sp, #-16]! // store fp and lr to the stack
     mov x29, sp // set the frame pointer to the stack pointer
-    stp xzr, xzr, [sp, #-16]!  // `len` (FP - 16) + `new_int` (FP - 8)
-    stp xzr, xzr, [sp, #-16]! // `array` (FP - 32) + `cap` (FP - 24)
-    str x0, [sp, #-16]!       // `fd` (FP - 48)
+    stp x1, x0, [sp, #-16]!  // `dest` (FP - 16) + `fd` (FP - 8)
+    stp xzr, xzr, [sp, #-16]! // boolean `odd` (FP - 32), `next_int` (FP - 24)
 
 parse_input.next_num:
     bl   read_u64
@@ -185,12 +194,13 @@ parse_input.next_num:
     b.gt parse_input.done // EOF
     b.eq parse_input.read_ok
     mov x0, #-1 // IO error
-    b   parse_input.quit
+    b   parse_input.fail
 
 parse_input.read_ok:
-    str x0, [x29, #-8] // store the number in temporary variable
-    ldp x0, x1, [x29, #-32] // load array and cap
-    ldr x2, [x29, #-16]    // load len
+    str x0, [x29, #-24] // store the number in temporary variable
+    parse_input.fetch_slot x4 // load the correct buffer
+    ldp x0, x1, [x4] // load array and cap
+    ldr x2, [x4, #16]    // load len
     cmp x2, x1
     b.lo parse_input.store_u64
     // add a 4k page, almost certainly bad. A better logic would be to multiply by 2, probably
@@ -199,26 +209,40 @@ parse_input.read_ok:
     bl  grow_map
     cbnz x0, parse_input.save_newarr
     
-    ldp x0, x1, [x29, #-32] // load previous array and cap to unmap the buffer
-    bl munmap
     mov x0, #0 // memory allocation error
-    b   parse_input.quit
+    b   parse_input.fail
 
 parse_input.save_newarr:
-    stp x0, x1, [x29, #-32] // store the new array and cap
+    parse_input.fetch_slot x4 // load the correct buffer
+    stp x0, x1, [x4] // store the new array and cap
 parse_input.store_u64:
-    ldp x2, x3, [x29, #-16] // load len and new_int
+    ldr x2, [x4, #16] // load len
+    ldr x3, [x29, #-24] // load next_int
     add x0, x0, x2 // move cursor to current position
-    str x3, [x0]   // store the number and increment the pointer
+    str x3, [x0]   // store the number
     add x2, x2, #8 // increment the length of sizeof(u64)
-    str x2, [x29, #-16] // store the new length
-    ldr x0, [x29, #-48] // load the file descriptor
+    str x2, [x4, #16] // store the new length
+    ldrb w0, [x29, #-32] // load the `odd` flag
+    eor x0, x0, #1 // toggle the flag
+    strb w0, [x29, #-32] // store the flag
+    ldr x0, [x29, #-8] // load the file descriptor
     b   parse_input.next_num // read the next chunk
 parse_input.done: // successful termination
-    ldp x0, x1, [x29, #-32] // load the array and cap
-    ldr x2, [x29, #-16]     // load len 
+    mov x0, #1    // ok code
+    b   parse_input.quit
+parse_input.fail:
+    str x0, [x29, #-24]   // store the error code in `next_int`
+    ldr x4, [x29, #-16]   // load the struct
+    ldp x0, x1, [x4]      // load the array and cap #1
+    bl  munmap
+    ldr x4, [x29, #-16]   // load the struct
+    ldp x0, x1, [x4, #24] // load the array and cap #2
+    cbz x1, parse_input.fail.cleanup_done
+    bl  munmap
+parse_input.fail.cleanup_done:
+    ldr x0, [x29, #-24] // load the error code
 parse_input.quit:
-    add sp, sp, #48 // discard the current frame
+    add sp, sp, #32 // discard the current frame
     ldp x29, lr, [sp], #16 // restore fp and lr
     ret
 
@@ -437,11 +461,21 @@ _start:
     bl  print_fail
 
 _start.file_opened:
-    // reserve 32 bytes for buffer (-32), capacity (-24), end (-16), and file descriptor/iterator (-8), plus a hefty 32
-    // byte area for the ulltoa buffer (needs 20 anyway)
-    sub sp, sp, #64
-    str x0, [x29, #-8] // store the file descriptor on the stack
+    // reserve:
+    // 8 bytes for the fd/end (-8)
+    // 8 bytes for iterator (-16),
+    // 16 bytes for the struct selector offset (-32), because of alignment requirements 
+    // a hefty 32 byte area for the ulltoa buffer (needs 20 anyway) (-64)
+    // 48 bytes for the parse_input struct (-112)
+    sub sp, sp, #112
 
+    // zero the struct of 6 quads
+    stp xzr, xzr, [sp]
+    stp xzr, xzr, [sp, #16]
+    stp xzr, xzr, [sp, #32]
+
+    str x0, [x29, #-8] // store the file descriptor on the stack
+    mov x1, sp // fp - 112
     bl parse_input
     cmp x0, #0
     b.hi _start.parse_ok
@@ -455,23 +489,25 @@ _start.file_opened:
     bl  print_fail    
 
 _start.parse_ok:
-    add x2, x0, x2 // calculate the end of the buffer
-    str x2, [x29, #-16] // store the end of the buffer
-    stp x0, x1, [x29, #-32] // store the buffer and the capacity
-
     ldr x0, [x29, #-8] // load the file descriptor
-    bl close 
+    bl close
 
-    ldr x4, [x29, #-32] // load the buffer
-    str x4, [x29, #-8] // store the buffer in the file descriptor slot, now it's the iterator
-    ldr x5, [x29, #-16] // load the end of the buffer
+    mov x0, xzr 
+    str x0, [x29, #-32] // set current struct to 0
+    mov x4, sp          // set the first struct
 
-    cmp x4, x5
-    b.hs _start.done // skip loop if unneeded
+_start.dump_array:
+    ldr x5, [x4] // load the array
+    str x5, [x29, #-16] // store the buffer, now it's the iterator
+    ldr x6, [x4, #16] // load the length
+    add x6, x5, x6 // calculate the end of the buffer
+    cmp x5, x6
+    b.hs _start.dump_array.done // skip loop if unneeded
+    str x6, [x29, #-8] // store the end of the buffer in the file descriptor slot
 
-_start.loop:
-    ldr x0, [x4], #8 // load the number
-    str x4, [x29, #-8] // inc the iterator
+_start.dump_array.loop:
+    ldr x0, [x5], #8 // load the number
+    str x5, [x29, #-16] // inc the iterator
     sub x1, x29, #64 // calculate the buffer start
     mov x2, #32 // 32 bytes for the ulltoa buffer 
     bl  ulltoa
@@ -480,14 +516,24 @@ _start.loop:
     mov x1, x2 // put the size in x1
     bl println
 
-    ldp x5, x4, [x29, #-16] // load the end of the buffer and the iterator
-    cmp x4, x5
-    b.lo _start.loop
+    ldp x5, x6, [x29, #-16] // load the iterator and the end of the buffer
+    cmp x5, x6
+    b.lo _start.dump_array.loop
 
-_start.done:
-    ldp x0, x1, [x29, #-32] // load the buffer and the capacity
+_start.dump_array.done:
+    ldr x0, [x29, #-32] // load the current struct index
+    add x4, sp, x0      // compute the right struct
+    ldp x0, x1, [x4] // load the buffer and the capacity
     bl munmap
 
+    ldr x0, [x29, #-32] // load the current struct index
+    add x0, x0, #24 // move to the next struct
+    add x4, sp, x0 // compute the right struct
+    str x0, [x29, #-32] // store the new struct index
+    cmp x0, #48 // 48 bytes for the struct
+    b.lo _start.dump_array // if we're not done, loop
+
+_start.quit:
     mov x0, #0 // success    
     bl  quit
 
