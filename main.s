@@ -93,7 +93,7 @@ count_chunks.loop:
     cmp  x0, #0     // !is_blank -> in_chunk
     cset x3, eq     // set in_chunk to 1 if we're not in a blank
     stp  x3, x2, [x29, #-16] // store `in_chunk` and counter
-    ldr  x0, [x29, #-32] // load the file descriptor for the next iteration
+    ldur x0, [x29, #-32] // load the file descriptor for the next iteration
     b    count_chunks.loop
 count_chunks.fail:
     mov x0, x1 // set x0 to the error code
@@ -129,6 +129,36 @@ grow_map.mremap:
 grow_map.quit:
     ret
 
+insertsort:
+    // x0 is a pointer to an array of u64
+    // x1 is the end of the array
+    // returns nothing
+    sub  x2, x1, x0 // calculate the length of the array
+    cmp  x2, #8
+    b.ls insertsort.done // if the array is empty or has only one element, we're done
+    add  x2, x0, #8 // move the pointer to the second element (insertion sort works like this)
+insertsort.loop:  
+    ldr  x4, [x2] // load current element
+    mov  x3, x2   // set the inner iterator
+    ldur x5, [x3, #-8] // load the previous element
+    cmp  x5, x4
+    b.ls insertsort.iloopend // skip loop if prev <= current
+insertsort.iloop: // this loops moves all element higer than x4 one position to the right
+    str  x5, [x3] // move the previous element to the current position
+    sub  x3, x3, #8 // move the inner iterator to the previous element
+    cmp  x3, x0 // compare the inner iterator with the start of the array
+    b.ls insertsort.iloopend // loop check: if we're at the start of the array, we're done
+    ldur x5, [x3, #-8] // load the (new) previous element
+    cmp x5, x4         // compare the (new) previous inner element with the current external one
+    b.hi insertsort.iloop // if x3 > x0 && x5 > x4, continue the loop
+insertsort.iloopend: // now insert x4 back
+    str x4, [x3] // store the current element in the position inner loop landed on (same if prev <= current)
+    add x2, x2, #8 // move the outer iterator forward
+    cmp x2, x1
+    b.lo insertsort.loop // if the outer iterator is less than the end of the array, continue the loop
+insertsort.done:
+    ret
+
 is_blank:
     // x0 is a character
     // returns x0 == 1 if the character is a blank, 0 otherwise
@@ -150,7 +180,7 @@ munmap:
     // x1 is the size of the chunk (should be a multiple of 4096 if allocated with alloc)
     // returns 0 on success, negative on error
     cmp  x0, #0
-    ccmp x1, #0, #0b0100, ne // if x0 != 0, cmp x1. If x1 != 0, set flags to 0b0100 (zero flag set)
+    ccmp x1, #0, #0b0100, ne // if x0 != 0, cmp x1. If x0 == 0, set flags to 0b0100 (zero flag set)
     b.eq munmap.quit // if !(x0 && x1), quit 
     mov  x8, #215 // munmap syscall
     svc  #0
@@ -173,12 +203,12 @@ parse_input:
 
 // macro to make this more manageable, clobbers x9 and x10
 .macro parse_input.fetch_slot DESTREG
-    mov x9, #24
+    mov  x9, #24
     ldrb w10, [x29, #-32] // load the flag
-    cmp x10, #1
+    cmp  x10, #1
     csel x10, x9, xzr, eq // if odd is true, pick an offset of 24 second (buffer, cap, len)
-    ldr x9, [x29, #-16] // load the struct
-    add \DESTREG, x9, x10 // add the offset
+    ldur x9, [x29, #-16] // load the struct
+    add  \DESTREG, x9, x10 // add the offset
 .endmacro
 
     // x0 is the file descriptor, x1 a struct of 6 quads
@@ -197,7 +227,7 @@ parse_input.next_num:
     b   parse_input.fail
 
 parse_input.read_ok:
-    str x0, [x29, #-24] // store the number in temporary variable
+    stur x0, [x29, #-24] // store the number in temporary variable
     parse_input.fetch_slot x4 // load the correct buffer
     ldp x0, x1, [x4] // load array and cap
     ldr x2, [x4, #16]    // load len
@@ -216,31 +246,31 @@ parse_input.save_newarr:
     parse_input.fetch_slot x4 // load the correct buffer
     stp x0, x1, [x4] // store the new array and cap
 parse_input.store_u64:
-    ldr x2, [x4, #16] // load len
-    ldr x3, [x29, #-24] // load next_int
-    add x0, x0, x2 // move cursor to current position
-    str x3, [x0]   // store the number
-    add x2, x2, #8 // increment the length of sizeof(u64)
-    str x2, [x4, #16] // store the new length
+    ldr  x2, [x4, #16] // load len
+    ldur x3, [x29, #-24] // load next_int
+    add  x0, x0, x2 // move cursor to current position
+    str  x3, [x0]   // store the number
+    add  x2, x2, #8 // increment the length of sizeof(u64)
+    stur x2, [x4, #16] // store the new length
     ldrb w0, [x29, #-32] // load the `odd` flag
     eor x0, x0, #1 // toggle the flag
     strb w0, [x29, #-32] // store the flag
-    ldr x0, [x29, #-8] // load the file descriptor
+    ldur x0, [x29, #-8] // load the file descriptor
     b   parse_input.next_num // read the next chunk
 parse_input.done: // successful termination
     mov x0, #1    // ok code
     b   parse_input.quit
 parse_input.fail:
-    str x0, [x29, #-24]   // store the error code in `next_int`
-    ldr x4, [x29, #-16]   // load the struct
-    ldp x0, x1, [x4]      // load the array and cap #1
+    stur  x0, [x29, #-24]   // store the error code in `next_int`
+    ldur x4, [x29, #-16]   // load the struct
+    ldp  x0, x1, [x4]      // load the array and cap #1
     bl  munmap
-    ldr x4, [x29, #-16]   // load the struct
+    ldur x4, [x29, #-16]   // load the struct
     ldp x0, x1, [x4, #24] // load the array and cap #2
     cbz x1, parse_input.fail.cleanup_done
     bl  munmap
 parse_input.fail.cleanup_done:
-    ldr x0, [x29, #-24] // load the error code
+    ldur x0, [x29, #-24] // load the error code
 parse_input.quit:
     add sp, sp, #32 // discard the current frame
     ldp x29, lr, [sp], #16 // restore fp and lr
@@ -334,7 +364,7 @@ read_cnk:
 read_cnk.next_byte:
     cmp x1, x2
     b.hs read_cnk.done
-    ldr x0, [x29, #-32] // load the file descriptor
+    ldur x0, [x29, #-32] // load the file descriptor
     bl read_byte
     cmp x1, #0
     b.lt read_cnk.fail // if x1 is negative, it's an error
@@ -346,17 +376,17 @@ read_cnk.next_byte:
     cbz w1, read_cnk.next_byte // if the flag is 0, we're still skipping blanks, so we just skip this blank
     b read_cnk.done // if the flag is 1, we've hit the end of the word, so we end the chunk
 read_cnk.store_byte:
-    mov w1, #1 // set the flag to 1
+    mov  w1, #1 // set the flag to 1
     strb w1, [x29, #-47] // store the flag to true - we've got at least a non-blank character so we're appending to the buffer
     ldrb w0, [x29, #-48] // load the byte
-    ldp x1, x2, [x29, #-16] // load the buffer. Also load end so it's already there for the next iteration
+    ldp  x1, x2, [x29, #-16] // load the buffer. Also load end so it's already there for the next iteration
     strb w0, [x1], #1   // store the byte and increment the pointer
-    str x1, [x29, #-16] // store the updated pointer
+    stur x1, [x29, #-16] // store the updated pointer
     b read_cnk.next_byte
 read_cnk.done:
-    ldr x1, [x29, #-16] // load the buffer
-    ldr x0, [x29, #-24] // load the saved beginning of the buffer
-    sub x1, x1, x0 // calculate the number of bytes read
+    ldur x1, [x29, #-16] // load the buffer
+    ldur x0, [x29, #-24] // load the saved beginning of the buffer
+    sub  x1, x1, x0 // calculate the number of bytes read
 read_cnk.fail:
     mov x0, x1 // set x0 to the result (was x1)
     add sp, sp, #48    // restore the stack
@@ -474,10 +504,10 @@ _start.file_opened:
     stp xzr, xzr, [sp, #16]
     stp xzr, xzr, [sp, #32]
 
-    str x0, [x29, #-8] // store the file descriptor on the stack
-    mov x1, sp // fp - 112
-    bl parse_input
-    cmp x0, #0
+    stur x0, [x29, #-8] // store the file descriptor on the stack
+    mov  x1, sp // fp - 112
+    bl   parse_input
+    cmp  x0, #0
     b.hi _start.parse_ok
     add x3, x0, #2 // errors are -2, -1, 0, add 2 to get 0, 1, 2
     lsl x3, x3, #3 // multiply by 8 to get the index in the jump table
@@ -489,31 +519,43 @@ _start.file_opened:
     bl  print_fail    
 
 _start.parse_ok:
-    ldr x0, [x29, #-8] // load the file descriptor
-    bl close
+    ldur x0, [x29, #-8] // load the file descriptor
+    bl   close
 
-    mov x0, xzr 
-    str x0, [x29, #-32] // set current struct to 0
-    mov x4, sp          // set the first struct
+    ldr x0, [sp] // load list #1
+    ldr x1, [sp, #16] // load the length #1
+    add x1, x0, x1
+
+    bl insertsort
+
+    ldr x0, [sp, #24] // load struct #2
+    ldr x1, [sp, #40] // load the length #2
+    add x1, x0, x1
+
+    bl insertsort
+
+    mov  x0, xzr 
+    stur x0, [x29, #-32] // set current struct to 0
+    mov  x4, sp          // set the first struct
 
 _start.dump_array:
-    ldr x5, [x4] // load the array
-    str x5, [x29, #-16] // store the buffer, now it's the iterator
-    ldr x6, [x4, #16] // load the length
-    add x6, x5, x6 // calculate the end of the buffer
-    cmp x5, x6
+    ldr  x5, [x4] // load the array
+    stur x5, [x29, #-16] // store the buffer, now it's the iterator
+    ldr  x6, [x4, #16] // load the length
+    add  x6, x5, x6 // calculate the end of the buffer
+    cmp  x5, x6
     b.hs _start.dump_array.done // skip loop if unneeded
-    str x6, [x29, #-8] // store the end of the buffer in the file descriptor slot
+    stur x6, [x29, #-8] // store the end of the buffer in the file descriptor slot
 
 _start.dump_array.loop:
-    ldr x0, [x5], #8 // load the number
-    str x5, [x29, #-16] // inc the iterator
-    sub x1, x29, #64 // calculate the buffer start
-    mov x2, #32 // 32 bytes for the ulltoa buffer 
-    bl  ulltoa
+    ldr  x0, [x5], #8 // load the number
+    stur x5, [x29, #-16] // store the inc'd the iterator
+    sub  x1, x29, #64 // calculate the buffer start
+    mov  x2, #32 // 32 bytes for the ulltoa buffer 
+    bl   ulltoa
 
     sub x0, x29, #64 // load the buffer start
-    mov x1, x2 // put the size in x1
+    sub x1, x2, #1 // put the size in x1, minus 1
     bl println
 
     ldp x5, x6, [x29, #-16] // load the iterator and the end of the buffer
@@ -521,16 +563,16 @@ _start.dump_array.loop:
     b.lo _start.dump_array.loop
 
 _start.dump_array.done:
-    ldr x0, [x29, #-32] // load the current struct index
-    add x4, sp, x0      // compute the right struct
-    ldp x0, x1, [x4] // load the buffer and the capacity
-    bl munmap
+    ldur x0, [x29, #-32] // load the current struct index
+    add  x4, sp, x0      // compute the right struct
+    ldp  x0, x1, [x4] // load the buffer and the capacity
+    bl   munmap
 
-    ldr x0, [x29, #-32] // load the current struct index
-    add x0, x0, #24 // move to the next struct
-    add x4, sp, x0 // compute the right struct
-    str x0, [x29, #-32] // store the new struct index
-    cmp x0, #48 // 48 bytes for the struct
+    ldur x0, [x29, #-32] // load the current struct index
+    add  x0, x0, #24 // move to the next struct
+    add  x4, sp, x0 // compute the right struct
+    stur x0, [x29, #-32] // store the new struct index
+    cmp  x0, #48 // 48 bytes for the struct
     b.lo _start.dump_array // if we're not done, loop
 
 _start.quit:
