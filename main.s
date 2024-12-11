@@ -1,3 +1,18 @@
+// solution to problems 1 and 2 of AoC 2024 day 1 in AArch64 Assembly on Linux (barebone)
+// I personally had 0 experience with AArch64 before this, just some rusty x86_64, and there's a dearth of documentation
+// about AArch64 assembly, TBH. ARM's manuals are not great unless you already know what you're looking for. 
+//
+// This solution is particularly verbose and uses a lot of ugliness to make coding more bearable.
+// In particular:
+// 1. I have spammed syscalls without any regard for performance, so this program is monstrously slow. If I ever get to
+//    optimise it, I'll probably use a buffer to read the file and then process it in memory. reads of size 1 are bad
+// 2. All addressing is PC-relative with `adr`, instead of doing adrp + add :lo12:, because I know this program was going
+//    to be smaller than 1MB. This is ugly but makes code way more readable
+// 3. I have probably overengineered memory allocation. I could have just mmap'd a large chunk of memory and then used it
+//    for everything, but I guess my brain was in a "let's do it properly" mode. I doubt this was properly done, though
+// 4. I'm pretty sure there are better instructions for some things, but I really couldn't be bothered to look them up
+//    in the manual - the docs are very terse
+
 .text
 .globl _start
 
@@ -104,6 +119,25 @@ count_chunks.done:
     ldp xzr, x0, [sp], #16 // load the counter
 count_chunks.end:
     ldp x29, lr, [sp], #16 // restore fp and lr
+    ret
+
+count_occurrences:
+    // x0 is a number
+    // x1 is the start of an array of numbers
+    // x2 is the end of the array
+    // returns the number of the number in x0
+    mov  x3, x0 // save the number
+    mov  x0, xzr // clear the counter
+    cmp  x1, x2
+    b.hs  count_occurrences.done // if the array is empty, we're done
+count_occurrences.loop:
+    ldr  x4, [x1], #8 // load a number from the array and increment the pointer
+    cmp  x4, x3
+    cset x5, eq // set x5 to 1 if x4 == x3
+    add  x0, x0, x5 // increment the counter if x4 == x3
+    cmp  x1, x2
+    b.lo  count_occurrences.loop // if we're not at the end of the array, continue
+count_occurrences.done:
     ret
 
 grow_map:
@@ -329,6 +363,42 @@ problem1.loop:
     cmp  x3, x2
     b.lo problem1.loop // if we're not at the end of the list, continue
 problem1.done:
+    ret
+
+problem2:
+    // x0 is the start of the first sorted list
+    // x1 is the start of the second sorted list
+    // x2 is the length of the two lists
+    // returns the result in x0
+    cbz  x2, problem2.nothing_to_do // if the lists are empty, we're done, result is 0
+    stp  x29, lr, [sp, #-16]! // store fp and lr to the stack
+    mov  x29, sp // set the frame pointer to the stack pointer
+    add  x3, x0, x2 // calculate the end of the first list
+    add  x4, x1, x2 // calculate the end of the second list
+    stp  x0, x3, [sp, #-16]! // store the start and the end of the first list
+    stp  x1, x4, [sp, #-16]! // store the start and the end of the second list
+    str  xzr, [sp, #-16]!    // result = 0 (FP - 48), + space for the current number (FP - 40)
+problem2.loop:
+    ldr  x5, [x0], #8 // load the next number from list #1 and increment the pointer
+    stur x0, [x29, #-16] // store the updated iterator
+    stur x5, [x29, #-40] // store the current number
+    mov  x0, x5  // set x0 to the current number
+    mov  x2, x4  // end of string 2 (x1 is start of string 2 already)
+    bl   count_occurrences
+    ldur x5, [x29, #-40] // load the current number
+    ldur x6, [x29, #-48]  // load the result
+    madd x6, x0, x5, x6 // x6 = x0 * x5 + x6
+    stur x6, [x29, #-48] // store the result
+    ldp  x0, x3, [x29, #-16] // load the iterator and end of the first list
+    ldp  x1, x4, [x29, #-32] // load the start and end of the second list
+    cmp  x0, x3
+    b.lo  problem2.loop // if we're not at the end of the first list, continue
+    mov  x0, x6 // set the result, which is still in x6
+    add  sp, sp, #48 // discard the current frame
+    ldp  x29, lr, [sp], #16 // restore fp and lr
+    ret
+problem2.nothing_to_do:
+    mov x0, xzr // result = 0
     ret
 
 quit:
@@ -566,6 +636,23 @@ _start.parse_ok:
 
     sub x1, x29, #48 // ulltoa buffer
     mov x2, #32      // buffer length 
+    bl  ulltoa
+
+    sub x0, x29, #48 // ulltoa buffer
+    mov x1, x2       // length of the string
+    bl  println
+
+    adr x0, problem2_str
+    mov x1, problem2_str_len
+    bl  print
+
+    ldr x0, [sp]  // set the first list
+    ldr x1, [sp, #24] // set the second list
+    ldr x2, [sp, #16] // load the length of list 1 (they're the same)
+    bl problem2
+
+    sub x1, x29, #48 // ulltoa buffer
+    mov x2, #32      // buffer length
     bl  ulltoa
 
     sub x0, x29, #48 // ulltoa buffer
