@@ -309,6 +309,28 @@ print_usage_and_quit:
     mov x1, usage_len
     b   print_fail
 
+problem1:
+    // x0 is the start of the first sorted list
+    // x1 is the start of the second sorted list
+    // x2 is the length of the two lists
+    // returns the result in x0
+    mov x3, x0  // use x3 as the iterator for the first list
+    mov x4, x1  // use x4 as the iterator for the second list
+    mov x0, xzr // use x0 as the sum
+    cbz x2, problem1.done // if the lists are empty, we're done, result is 0
+    add x2, x3, x2 // calculate the end of the first list
+problem1.loop:
+    ldr  x5, [x3], #8 // load the first number and increment the pointer
+    ldr  x6, [x4], #8 // load the second number and increment the pointer
+    sub  x5, x5, x6   // subtract the second number from the first
+    tst  x5, x5       // check if the result is negative
+    cneg x5, x5, mi   // if x5 is negative, negate it, otherwise leave it as is
+    add  x0, x0, x5   // add the result to the sum
+    cmp  x3, x2
+    b.lo problem1.loop // if we're not at the end of the list, continue
+problem1.done:
+    ret
+
 quit:
     mov x8, #93
     svc #0
@@ -492,12 +514,11 @@ _start:
 
 _start.file_opened:
     // reserve:
-    // 8 bytes for the fd/end (-8)
-    // 8 bytes for iterator (-16),
-    // 16 bytes for the struct selector offset (-32), because of alignment requirements 
-    // a hefty 32 byte area for the ulltoa buffer (needs 20 anyway) (-64)
-    // 48 bytes for the parse_input struct (-112)
-    sub sp, sp, #112
+    // 8 bytes for the fd (-8)
+    // 8 bytes for padding (due to alignment) (-16)
+    // a hefty 32 byte area for the ulltoa buffer (needs 20 anyway) (-48)
+    // 48 bytes for the parse_input struct (-96)
+    sub sp, sp, #96
 
     // zero the struct of 6 quads
     stp xzr, xzr, [sp]
@@ -505,7 +526,7 @@ _start.file_opened:
     stp xzr, xzr, [sp, #32]
 
     stur x0, [x29, #-8] // store the file descriptor on the stack
-    mov  x1, sp // fp - 112
+    mov  x1, sp // fp - 96
     bl   parse_input
     cmp  x0, #0
     b.hi _start.parse_ok
@@ -534,48 +555,29 @@ _start.parse_ok:
 
     bl insertsort
 
-    mov  x0, xzr 
-    stur x0, [x29, #-32] // set current struct to 0
-    mov  x4, sp          // set the first struct
+    adr x0, problem1_str
+    mov x1, problem1_str_len
+    bl  print
 
-_start.dump_array:
-    ldr  x5, [x4] // load the array
-    stur x5, [x29, #-16] // store the buffer, now it's the iterator
-    ldr  x6, [x4, #16] // load the length
-    add  x6, x5, x6 // calculate the end of the buffer
-    cmp  x5, x6
-    b.hs _start.dump_array.done // skip loop if unneeded
-    stur x6, [x29, #-8] // store the end of the buffer in the file descriptor slot
+    ldr x0, [sp]  // set the first list
+    ldr x1, [sp, #24] // set the second list
+    ldr x2, [sp, #16] // load the length of list 1 (they're the same)
+    bl problem1
 
-_start.dump_array.loop:
-    ldr  x0, [x5], #8 // load the number
-    stur x5, [x29, #-16] // store the inc'd the iterator
-    sub  x1, x29, #64 // calculate the buffer start
-    mov  x2, #32 // 32 bytes for the ulltoa buffer 
-    bl   ulltoa
+    sub x1, x29, #48 // ulltoa buffer
+    mov x2, #32      // buffer length 
+    bl  ulltoa
 
-    sub x0, x29, #64 // load the buffer start
-    sub x1, x2, #1 // put the size in x1, minus 1
-    bl println
+    sub x0, x29, #48 // ulltoa buffer
+    mov x1, x2       // length of the string
+    bl  println
 
-    ldp x5, x6, [x29, #-16] // load the iterator and the end of the buffer
-    cmp x5, x6
-    b.lo _start.dump_array.loop
+    ldp x0, x1, [sp] // load the buffer and the capacity of the first list
+    bl  munmap
 
-_start.dump_array.done:
-    ldur x0, [x29, #-32] // load the current struct index
-    add  x4, sp, x0      // compute the right struct
-    ldp  x0, x1, [x4] // load the buffer and the capacity
-    bl   munmap
+    ldp x0, x1, [sp, #24] // load the buffer and the capacity of the second list
+    bl  munmap
 
-    ldur x0, [x29, #-32] // load the current struct index
-    add  x0, x0, #24 // move to the next struct
-    add  x4, sp, x0 // compute the right struct
-    stur x0, [x29, #-32] // store the new struct index
-    cmp  x0, #48 // 48 bytes for the struct
-    b.lo _start.dump_array // if we're not done, loop
-
-_start.quit:
     mov x0, #0 // success    
     bl  quit
 
@@ -603,6 +605,14 @@ newline:
 open_fail:
     .ascii "Failed to open file\n"
     .equ open_fail_len, . - open_fail
+
+problem1_str:
+    .ascii "Problem 1: "
+    .equ problem1_str_len, . - problem1_str
+
+problem2_str:
+    .ascii "Problem 2: "
+    .equ problem2_str_len, . - problem2_str
 
 usage:
     .ascii "Usage: 01 INPUT\n"
