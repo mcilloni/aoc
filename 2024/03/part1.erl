@@ -1,5 +1,5 @@
-%hello world program
--module(main).
+%part 1 of AoC 2024 day 3
+-module(part1).
 -export([main/1]).
 
 main([File]) -> 
