@@ -3,3 +3,4 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 
 - Day 1: AArch64 Linux ASM (syscalls only)
 - Day 2: (GNU) COBOL
+- Day 3: Erlang

@@ -8,3 +8,6 @@ main.beam: main.erl
 
 clean:
 	rm -f main.beam
+
+run: main.beam
+	erl -noshell -s main main input -s init stop
