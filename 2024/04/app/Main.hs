@@ -1,3 +1,6 @@
+-- AoC 2024 Day 4
+-- Note: I am still not super good with Haskell, so I may have made some mistakes. Feel free to point them out.
+
 module Main where
 import System.Environment (getArgs, getProgName)
 import System.Exit (exitFailure)
@@ -16,16 +19,11 @@ main = do
             hPutStr stderr $ "usage: " ++ name ++ " INPUT\n"
             exitFailure
 
-pattern :: String
-pattern = "XMAS"
+data Direction = None | North | NorthEast | East | SouthEast | South | SouthWest | West | NorthWest
+    deriving (Enum, Eq, Show)
 
-data Direction = North | NorthEast | East | SouthEast | South | SouthWest | West | NorthWest
-    deriving (Bounded, Enum, Eq, Show)
-
-directions :: [Direction]
-directions = [minBound..maxBound]
-    
 dirVersor :: Direction -> (Int, Int)
+dirVersor None = (0, 0)
 dirVersor North = (0, 1)
 dirVersor NorthEast = (1, 1)
 dirVersor East = (1, 0)
@@ -34,6 +32,22 @@ dirVersor South = (0, -1)
 dirVersor SouthWest = (-1, -1)
 dirVersor West = (-1, 0)
 dirVersor NorthWest = (-1, 1)
+
+infixl 6 |+|
+(|+|) :: (Int, Int) -> Direction -> (Int, Int)
+(a, b) |+| dir = (a + dx, b + dy)
+    where (dx, dy) = dirVersor dir
+
+type Pattern a = (a, a, a)
+pattern :: Pattern Char
+pattern = ('M', 'A', 'S')
+
+type AxisOffset = (Direction, Direction, Direction)
+
+axisOffsets :: [[AxisOffset]]
+axisOffsets =
+    [[(NorthWest, None, SouthEast), (SouthEast, None, NorthWest)],
+    [(SouthWest, None, NorthEast), (NorthEast, None, SouthWest)]]
 
 newtype Matrix a = Matrix [[a]]
 
@@ -67,21 +81,29 @@ get :: Int -> [a] -> Maybe a
 get i list
     | i < 0 || i >= length list = Nothing
     | otherwise = Just $ list !! i -- not a fan of !!
-    
+
 get2D :: (Int, Int) -> Matrix a  -> Maybe a
 get2D (x, y) grid = do
     row <- get y $ unMatrix grid
     get x row
 
-probeMatrix :: Eq a => Matrix a -> [a] -> Int
-probeMatrix grid target = sum $ map (\x -> probePoint x grid target) $ coords grid
+probeMatrix :: Eq a => Matrix a -> Pattern a -> Int
+probeMatrix grid target = sum $ map (\x -> fromEnum $ probePoint x grid target) $ coords grid
 
-probePoint :: Eq a => (Int, Int) -> Matrix a -> [a] -> Int
-probePoint (x, y) grid target = sum $ map (\dir -> fromEnum $ probePointTowards dir (x, y) grid target) directions 
+probePoint :: Eq a => (Int, Int) -> Matrix a -> Pattern a -> Bool
+probePoint p grid target = all (any (probeOffSet p grid target)) axisOffsets
 
-probePointTowards :: Eq a => Direction -> (Int, Int) -> Matrix a -> [a] -> Bool
-probePointTowards dir (x, y) grid target = case target of
-    [] -> True
-    (t:ts) -> case get2D (x, y) grid of
-        Just c -> (c == t) && probePointTowards dir (moveTowards dir (x, y)) grid ts
-        Nothing -> False
+probeOffSet :: Eq a => (Int, Int) -> Matrix a -> Pattern a -> AxisOffset -> Bool
+probeOffSet p grid (a, b, c) (o1, o2, o3) =
+    case fetchAll grid [p |+| o1, p |+| o2, p |+| o3] of
+        Just [x, y, z] -> (x, y, z) == (a, b, c)
+        _ -> False
+
+fetchAll :: Eq a => Matrix a -> [(Int, Int)] -> Maybe [a]
+fetchAll grid points = allMaybes $ map (`get2D` grid) points
+
+allMaybes :: [Maybe a] -> Maybe [a]
+allMaybes = foldr (\x acc -> do
+    xs <- acc
+    x' <- x
+    return $ x':xs) (Just [])
