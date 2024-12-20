@@ -5,4 +5,6 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 - Day 2: (GNU) COBOL
 - Day 3: Erlang
 - Day 4: Haskell
+- Day 5: Common Lisp
+
 
