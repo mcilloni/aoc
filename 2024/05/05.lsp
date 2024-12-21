@@ -1,3 +1,4 @@
+#!/usr/bin/env -S sbcl --script
 ; solution to AoC 2024 day 5 in Common Lisp (only tested on Steel Bank)
 ; I'm quite a noob in Lisp, so I'm sure this code could be improved a lot
 (require :asdf)
