@@ -1,0 +1,479 @@
+# solution for Advent of Code 2024, day 7
+#
+# This solution is in Fork, a toy language I created for fun in the mid '10s and never really finished.
+# It's a statically typed language with a C-like syntax, with a few niceties added in (like the ability to define methods
+# on structs, anonymous structs, and a few other things). It is self hosting, and can compile itself, which thankfully 
+# guarantees it has some level of correctness (the compiler is vastly more complex than this code after all).
+# The compiler lowers the code to (very incorrect) SSA-style C code, which works well enough for the language's features
+# as long as the C compiler is lenient enough (i.e. GCC and Clang with all warnings off, plus some).
+
+module main
+
+import args
+import err
+import fs
+import io
+import mem
+import proc
+import tty
+import vect
+
+# fork never supported char literals, const or macros, so we use variables instead
+mut LF uint8 = 10
+mut SPACE uint8 = 32
+mut COLON uint8 = 58
+
+# error handling
+mut EOF ptr err:Error
+
+alias Equation struct (
+    expected uint64,
+    operands ptr vect:Vect
+)
+
+func newEquation(expected uint64, operands ptr vect:Vect) ptr Equation
+    mut eq = <ptr Equation>(mem:alloc(size(Equation)))
+    if eq?
+        eq'expected = expected
+        eq'operands = operands
+    /if
+
+    return eq
+/func
+
+func freeEquation(eq ptr Equation)
+    if eq?
+        vect:free(eq'operands)
+        mem:free(eq)
+    /if
+/func
+
+alias Source struct (
+    name ptr uint8,
+    stream ptr io:Stream,
+    peek uint8,
+)
+
+method Source.close()
+    io:streamClose(me'stream)
+/method
+
+method Source.ended() bool
+    return me'stream.ended()
+/method
+
+method Source.error() ptr err:Error
+    return me'stream.error()
+/method
+
+method Source.next() {ch uint8, err ptr err:Error}
+    if me.ended()
+        return {0, EOF}
+    else
+        mut cur = me'peek
+
+        mut ch uint8
+
+        mut nbytes = me'stream.readStr(ptr ch, 1)
+
+        mut err = me.error()
+        if err?
+            return {0, err}
+        /if
+
+        if nbytes == 0
+            me'peek = 0
+        else
+            me'peek = ch
+        /if
+
+        return {cur, null}
+    /if
+/method
+
+method Source.peek() uint8
+    return me'peek
+/method
+
+func check(err ptr err:Error)
+    if err?
+        tty:err("error: ")
+        tty:failln(err.msg())
+    /if
+/func
+
+func dumpEquation(eq ptr Equation)
+    tty:outint(eq'expected)
+    tty:out(": ")
+
+    mut i uintptr = 0
+    mut lops = eq'operands.len()
+
+    while i < lops
+        mut op = val eq'operands.getInt(i)
+
+        tty:outint(op)
+
+        if i < lops - 1
+            tty:out(" ")
+        /if
+
+        i++
+    /while
+
+    tty:outln("")
+/func
+
+func dumpEquations(equations ptr vect:Vect)
+    mut len = equations.len()
+
+    mut i uintptr = 0
+    
+    while i < len
+        dumpEquation(<ptr Equation>(val equations.get(i)))
+
+        i++
+    /while
+/func
+
+func dumpSolution(eq ptr Equation, solution uint64)
+    tty:outint(eq'expected)
+    tty:out(": ")
+
+    mut i uintptr = 0
+    mut lops = eq'operands.len()
+
+    mut saved = solution
+
+    while i < lops
+        mut op = val eq'operands.getInt(i)
+
+        tty:outint(op)
+
+        if i < lops - 1
+            tty:out((solution & 1) == 1 => " * " || " + ")
+        /if
+
+        solution = solution sh> 1
+
+        i++
+    /while
+
+    tty:out(" (")
+    tty:outint(saved)
+    tty:outln(")")
+/func
+
+func expectError(wanted, got uint8) ptr err:Error
+    mut wantedStr [2] uint8
+    wantedStr[0] = wanted
+    wantedStr[1] = 0
+
+    mut gotStr [2] uint8
+    gotStr[0] = got
+    gotStr[1] = 0
+
+    mut toglue [6] ptr uint8
+
+    toglue[0] = "expected '"
+    toglue[1] = ptr wantedStr[0]
+    toglue[2] = "', got '"
+    toglue[3] = ptr gotStr[0]
+    toglue[4] = "'"
+    toglue[5] = null
+
+    return err:glue(ptr toglue[0])
+/func
+
+func isNum(c uint8) bool
+    return c >= 48 and c <= 57
+/func
+
+func openSource(name ptr uint8) {src Source, err ptr err:Error}
+    mut source Source
+    source'name = name
+
+    mut {f, err} = fs:fileOpen(name)
+
+    if err?
+        return {source, err}
+    /if
+
+    source'stream = f
+
+    # pre-fetch the first character
+    # ch will be 0, ignore it
+    mut {ch, err} = source.next()
+    if err?
+        return {source, err}
+    /if
+
+    return {source, null}
+/func
+
+func parseChar(src ptr Source, ch uint8) ptr err:Error
+    if ch == SPACE
+        return readError(src'name, "refusing to parse space")
+    /if
+
+    mut err = skipSpaces(src)
+    if err?
+        return err
+    /if
+
+    mut {c, err} = src.next()
+    if err?
+        return err
+    /if
+
+    if c != ch
+        return expectError(ch, c)
+    /if
+
+    return null 
+/func
+
+func parseEquation(src ptr Source) {eq ptr Equation, err ptr err:Error}
+    mut {operand, err} = parseUnsigned(src)
+    if err?
+        return {null, err}
+    /if
+
+    err = parseChar(src, COLON)
+    if err?
+        return {null, err}
+    /if
+
+    mut {operands, err} = parseOperands(src)
+    if err?
+        return {null, err}
+    /if
+
+    if not src.ended()    
+        err = parseChar(src, LF)
+        if err?
+            vect:free(operands)
+            return {null, err}
+        /if
+    /if
+
+    mut eq = newEquation(operand, operands)
+    if not eq?
+        vect:free(operands)
+        return {null, readError(src'name, "out of memory")}
+    /if
+
+    return {eq, null}
+/func    
+
+func parseEquations(src ptr Source) {equations ptr vect:Vect, err ptr err:Error}
+    mut equations = vect:new(0)
+    
+    while not src.ended()
+        mut {eq, err} = parseEquation(src)
+
+        if err?
+            vect:freeAll(equations, ptr freeEquation)
+            return {null, err}
+        /if
+
+        equations.append(eq)
+    /while
+
+    return {equations, null}
+/func
+
+func parseFile(fname ptr uint8) {equations ptr vect:Vect, err ptr err:Error}
+    mut {source, err} = openSource(fname)
+    if err?
+        return {null, err}
+    /if
+
+    mut res = parseEquations(ptr source)
+
+    source.close()
+
+    return res
+/func
+
+func parseOperands(src ptr Source) {operands ptr vect:Vect, err ptr err:Error}
+    mut operands = vect:new(0)
+
+    while not src.ended() and src.peek() != LF
+        mut {operand, err} = parseUnsigned(src)
+        if err?
+            vect:free(operands)
+            return {null, err}
+        /if
+
+        operands.appendInt(operand)
+    /while
+
+    mut oplen = operands.len()
+
+    if oplen < 2 or oplen >= 64
+        vect:free(operands)
+        return {null, readError(src'name, "invalid number of operands, must be between 2 and 63")}
+    /if
+    
+    return {operands, null}
+/func
+
+func parseUnsigned(src ptr Source) {num uint64, err ptr err:Error}
+    mut num uint64 = 0
+
+    mut err = skipSpaces(src)
+    if err?
+        return {0, err}
+    /if
+
+    if src.ended()
+        return {0, EOF}
+    /if
+
+    while not src.ended() and isNum(src.peek())
+        mut {ch, err} = src.next()
+
+        if err?
+            return {0, err}
+        /if 
+            
+        mut digit = <uint64>(ch - 48) # ASCII '0' is 48
+    
+        num = num * 10 + digit
+    /while
+
+    return {num, null}
+/func
+
+func part1(eqs ptr vect:Vect) uint64
+    mut len = eqs.len()
+
+    mut i uintptr = 0
+    mut count uint64 = 0
+
+    while i < len
+        mut eq = <ptr Equation>(val eqs.get(i))
+
+        mut {ok, solution} = testSolution(eq)
+
+        if ok
+            tty:out("found solution for #")
+            tty:outint(i)
+            tty:out(": ")
+
+            dumpSolution(eq, solution)
+
+            count = count + eq'expected
+        /if
+
+        i++
+    /while
+
+    return count
+/func
+
+func readError(filename ptr uint8, msg ptr uint8) ptr err:Error
+  mut toglue [4] ptr uint8
+
+  toglue[0] = filename
+  toglue[1] = ": "
+  toglue[2] = msg
+  toglue[3] = null
+
+  return err:glue(ptr toglue[0])
+/func
+
+func skipSpaces(src ptr Source) ptr err:Error
+    while not src.ended() and src.peek() == SPACE
+        mut res = src.next()
+        
+        if res'err?
+            return res'err
+        /if
+    /while
+
+    return null
+/func
+
+func testSet(eq ptr Equation, set uintptr) bool
+    mut {expected, operands} = val eq
+
+    mut result uint64 = val operands.getInt(0)
+
+    # 1 is mul, 0 is add
+
+    mut len = operands.len()
+    mut i uintptr = 1
+
+    while i < len
+        mut op = val operands.getInt(i)
+
+        if (set & 1) == 1
+            result = result * op
+        else
+            result = result + op
+        /if
+
+        if result > expected
+            return false
+        /if
+
+        set = set sh> 1
+
+        i++
+    /while
+
+    return result == expected
+/func
+
+func testSolution(eq ptr Equation) {ok bool, solution uint64}
+    mut opslen = eq'operands.len()
+
+    if opslen >= 64 or opslen < 2
+        proc:panic("invalid number of operands")
+    /if
+
+    mut set uintptr = 0
+    mut end = <uintptr>(1) sh< (opslen - 1)
+
+    while set < end
+        mut ok = testSet(eq, set)
+        if ok
+            return {true, set}
+        /if
+
+        set++
+    /while
+
+    return {false, 0}
+/func
+
+entry
+    # hack: ctrans doesn't really support global assignments, so we must do it in the entry
+    mut eof err:Error
+    eof'msg = "end of file"
+
+    EOF = ptr eof
+
+    mut args = args:new("AoC 2024 - Day 7")
+
+    args.unboundsOpts("INPUT", true, true)
+
+    check(args.parse())
+
+    mut fname = <ptr uint8>(val args.getUnbounds().get(0))
+
+    mut {equations, err} = parseFile(fname)
+
+    check(err)
+
+    mut res = part1(equations)
+    tty:out("Part 1: ")
+    tty:outint(res)
+    tty:outln("")
+
+    vect:freeAll(equations, ptr freeEquation)
+
+    args:free(args)
+/entry
