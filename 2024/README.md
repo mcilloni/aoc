@@ -7,6 +7,7 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 - Day 4: Haskell
 - Day 5: Common Lisp
 - Day 6: TCL
+- Day 7: Fork (https://github.com/mcilloni/fork)
 
 
 
