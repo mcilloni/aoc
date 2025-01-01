@@ -8,6 +8,8 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 - Day 5: Common Lisp
 - Day 6: TCL
 - Day 7: Fork (https://github.com/mcilloni/fork)
+- Day 8: Fortran
+
 
 
 
