@@ -1,0 +1,561 @@
+/*
+ * Copyright (c) 2024-2025 Zuru Tech HK Limited, All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#define _CRT_SECURE_NO_WARNINGS 1
+#define _XOPEN_SOURCE 700
+
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "hashtable.h"
+
+#if defined(_MSC_VER)
+#pragma warning(disable : 4200) // borked C11 flex array
+#pragma warning(disable : 4996) // strdup
+#endif
+
+#define REHASH_THRESHOLD 75U
+
+// if this doesn't hold then the hash table will misbehave due to overflows. AFAIK this is never false in any relevant
+// case
+static_assert(sizeof(int32_t) <= sizeof(ptrdiff_t), "int32_t must either be or fit into ptrdiff_t");
+
+// Prime list courtesy of Aaron Krowne (http://br.endernet.org/~akrowne/)
+// Taken from http://planetmath.org/encyclopedia/GoodHashTablePrimes.html
+static const int32_t primes[] = {
+    53,       97,       193,      389,       769,       1543,      3079,      6151,       12289,
+    24593,    49157,    98317,    196613,    393241,    786433,    1572869,   3145739,    6291469,
+    12582917, 25165843, 50331653, 100663319, 201326611, 402653189, 805306457, 1610612741,
+    -1 // -1 to indicate end of list
+};
+
+struct maybe_owned_str {
+    const char *str;
+    bool owned;
+};
+
+void maybe_free(struct maybe_owned_str str) {
+    if (str.owned) {
+        free((void *) str.str); // cast away constness, the string was malloc'd
+    }
+}
+
+struct maybe_owned_str maybe_move(struct maybe_owned_str *const mstr) {
+    assert(mstr);
+
+    struct maybe_owned_str ret = { .str = mstr->str, .owned = mstr->owned };
+
+    *mstr = (struct maybe_owned_str) { 0 };
+
+    return ret;
+}
+
+const char *maybe_take(struct maybe_owned_str *const str) {
+    assert(str);
+
+    if (!str->owned) {
+        return strdup(str->str);
+    }
+
+    const char *const owned = str->str;
+
+    *str = (struct maybe_owned_str) { 0 };
+
+    return owned;
+}
+
+struct table_entry {
+    const char *key;
+    uintmax_t value;
+
+    // offset to the next entry in the bucket. 0 means no next entry, because 0 is always a bucket start
+    size_t next;
+};
+
+struct hashtable {
+    uint32_t len, cap;
+    const int32_t *buckets_no;
+
+    size_t free_cur;
+    struct table_entry entries[];
+};
+
+static struct table_entry *bucket_find_entry(
+    struct hashtable *const ht,
+    const size_t bucket_offs,
+    const char *const key,
+    struct table_entry **const first_free,
+    size_t *bucket_end
+) {
+    assert(ht && ht->buckets_no && bucket_offs < (uint32_t) *ht->buckets_no);
+
+    struct table_entry *const cells = ht->entries;
+
+    size_t current_offs = bucket_offs;
+    for (;;) {
+        assert(current_offs < ht->cap);
+
+        struct table_entry *entry = cells + current_offs;
+
+        if (entry->key) {
+            if (!strcmp(entry->key, key)) {
+                return entry;
+            }
+        } else if (first_free && !*first_free) {
+            // given that we're already recurring through the bucket, we can also find the first free cell and return it
+            // this is used by set to avoid recurring through the bucket twice
+            *first_free = entry;
+        }
+
+        if (!entry->next) {
+            if (bucket_end) {
+                *bucket_end = current_offs;
+            }
+
+            break;
+        }
+
+        current_offs = entry->next;
+    }
+
+    return NULL;
+}
+
+static uint32_t djb2(const char *str) {
+    uint32_t hash = 5381;
+
+    for (;;) {
+        const int32_t c = (uint8_t) *str++;
+
+        if (!c) {
+            break;
+        }
+
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+/**
+ * @brief Find the entry containing a given key in the hash table. For simplicity, the first free hole in the bucket is
+ *        optionally determined (if any), and the bucket end.
+ */
+static struct table_entry *hash_get_entry_for_set(
+    struct hashtable *const ht,
+    const char *const key,
+    struct table_entry **const first_free,
+    size_t *const bucket_end
+) {
+    assert(ht && ht->buckets_no && *ht->buckets_no > 0);
+
+    if (!key) {
+        return NULL;
+    }
+
+    const uint32_t buckets_no = (uint32_t) *ht->buckets_no;
+    assert(buckets_no <= ht->cap);
+
+    const uint32_t hash = djb2(key);
+    const uint32_t bucket = hash % buckets_no;
+
+    return bucket_find_entry(ht, (ptrdiff_t) bucket, key, first_free, bucket_end);
+}
+
+static struct table_entry *hash_get_entry(struct hashtable *const ht, const char *const key) {
+    return hash_get_entry_for_set(ht, key, NULL, NULL);
+}
+
+static struct hashtable *hash_new(const int32_t *const primes_list, const size_t extra_cap) {
+    assert(primes_list);
+
+    if (*primes_list <= 0) {
+        return NULL;
+    }
+
+    const size_t cap = (size_t) *primes_list + extra_cap;
+    struct hashtable *table = calloc(1, sizeof(struct hashtable) + cap * sizeof(struct table_entry));
+    if (!table) {
+        return NULL;
+    }
+
+    *table = (struct hashtable) {
+        .cap = (uint32_t) *primes_list,
+        .buckets_no = primes_list,
+        .free_cur = *primes_list,
+    };
+
+    return table;
+}
+
+static enum hash_set_result hash_set(
+    struct hashtable **table_ptr,
+    const struct maybe_owned_str key,
+    uintmax_t value,
+    uintmax_t *const old_value
+);
+
+static bool hash_rehash_and_set_new(
+    struct hashtable **const table_ptr,
+    const struct maybe_owned_str key,
+    const uintmax_t value
+) {
+    assert(table_ptr && *table_ptr);
+
+    struct hashtable *const table = *table_ptr;
+
+    assert(table->buckets_no && *table->buckets_no > 0);
+
+    // we accept a few reallocations when we rehash for the sake of simplicity
+    // TODO: add a magical "extra cap" value
+    struct hashtable *new_table = hash_new(table->buckets_no + 1, 0);
+    if (!new_table) {
+        return false;
+    }
+
+    // steal the old table's entries
+    const struct table_entry *const end = table->entries + table->cap;
+    for (struct table_entry *it = table->entries; it < end; ++it) {
+        if (!it->key) {
+            continue;
+        }
+
+        struct maybe_owned_str stolen_key = { .str = it->key, .owned = true };
+
+        const enum hash_set_result res = hash_set(&new_table, stolen_key, it->value, NULL);
+
+        // this is impossible, keys are unique
+        assert(res != HASH_SET_UPDATED);
+
+        if (!res) {
+            // free the new table - without deleting anything. The keys are all still in place in the old one.
+            // Everything is fine. The old table is still valid and the new one is not.
+            free(new_table);
+            maybe_free(key);
+
+            return false;
+        }
+    }
+
+    // set the last value
+    uintmax_t old_value;
+    const enum hash_set_result res = hash_set(&new_table, key, value, &old_value);
+    if (!res) {
+        free(new_table);
+        maybe_free(key);
+
+        return false;
+    }
+
+    // free the old table without deleting the keys
+    free(table);
+
+    *table_ptr = new_table;
+
+    return true;
+}
+
+static bool hash_grow(struct hashtable **const table_ptr) {
+    assert(table_ptr && *table_ptr);
+
+    struct hashtable *table = *table_ptr;
+    assert(table->buckets_no && *table->buckets_no > 0);
+
+    const uint32_t old_cap = table->cap;
+    assert(old_cap >= (uint32_t) *table->buckets_no);
+
+    const uint32_t new_cap = old_cap * 3 / 2;
+    if (new_cap <= old_cap) {
+        return false;
+    }
+
+    table = realloc(table, sizeof(struct hashtable) + new_cap * sizeof(struct table_entry));
+    if (!table) {
+        return false;
+    }
+
+    // zero the new values. _technically_ UB, but works everywhere
+    memset(table->entries + old_cap, 0, (new_cap - old_cap) * sizeof(struct table_entry));
+    table->cap = new_cap;
+
+    *table_ptr = table;
+
+    return true;
+}
+
+static bool hash_bucket_append(
+    struct hashtable **const table_ptr,
+    const size_t last_item,
+    struct maybe_owned_str key,
+    const uintmax_t value
+) {
+    assert(table_ptr && *table_ptr && key.str);
+
+    struct hashtable *table = *table_ptr;
+
+    assert(last_item < table->cap);
+
+    if (table->free_cur >= table->cap) {
+        if (!hash_grow(table_ptr)) {
+            return false;
+        }
+
+        table = *table_ptr;
+    }
+
+    assert(table->free_cur < table->cap);
+
+    const char *const new_key = maybe_take(&key);
+    if (!new_key) {
+        return false;
+    }
+
+    const size_t new_entry_offs = table->free_cur++;
+    struct table_entry *new_entry = table->entries + new_entry_offs;
+    *new_entry = (struct table_entry) {
+        .key = (char *) new_key,
+        .value = value,
+    };
+
+    struct table_entry *const last = table->entries + last_item;
+    last->next = new_entry_offs;
+
+    ++table->len; // don't forget to increment the length!
+
+    return true;
+}
+
+static uint32_t load_factor(const uint32_t len, const uint32_t buckets_no) {
+    assert(len * 100 >= len); // check for overflow
+
+    return len * 100 / buckets_no;
+}
+
+enum hash_set_result hash_set(
+    struct hashtable **table_ptr,
+    struct maybe_owned_str key,
+    const uintmax_t value,
+    uintmax_t *const old_value
+) {
+    assert(table_ptr && *table_ptr && key.str);
+
+    struct hashtable *table = *table_ptr;
+
+    struct table_entry *first_free = NULL;
+
+    size_t bucket_end = 0;
+    struct table_entry *const existing = hash_get_entry_for_set(table, key.str, &first_free, &bucket_end);
+
+    enum hash_set_result res = HASH_SET_FAILED;
+
+    if (existing) {
+        // no old_value means the client doesn't care about the old value
+        if (old_value) {
+            *old_value = existing->value;
+        }
+
+        existing->value = value;
+
+        res = HASH_SET_UPDATED;
+
+        goto finish;
+    }
+
+    // the value doesn't exist - set the old value to NULL
+    if (old_value) {
+        *old_value = 0;
+    }
+
+    const uint32_t new_len = table->len + 1;
+    assert(table->buckets_no && *table->buckets_no > 0);
+
+    if (load_factor(new_len, (uint32_t) *table->buckets_no) >= REHASH_THRESHOLD) {
+        if (!hash_rehash_and_set_new(&table, maybe_move(&key), value)) {
+            res = HASH_SET_FAILED;
+            goto finish;
+        }
+
+        assert(table);
+
+        *table_ptr = table;
+
+        res = HASH_SET_ADDED;
+
+        goto finish;
+    }
+
+    if (first_free) {
+        first_free->key = maybe_take(&key);
+        if (!first_free->key) {
+            return HASH_SET_FAILED;
+        }
+
+        first_free->value = value;
+
+        table->len = new_len;
+
+        res = HASH_SET_ADDED;
+
+        goto finish;
+    }
+
+    // if we reached this point then the bucket has no holes and we need to add a new entry at the end
+    res = hash_bucket_append(table_ptr, bucket_end, maybe_move(&key), value) ? HASH_SET_ADDED
+                                                                             : HASH_SET_FAILED;
+
+finish:
+    maybe_free(key);
+
+    return res;
+}
+
+struct hashtable *hashtable_new(void) {
+    assert(*primes > 0);
+
+    return hash_new(primes, 0U);
+}
+
+void hashtable_delete(struct hashtable *const table) {
+    if (!table) {
+        return;
+    }
+
+    const struct table_entry *const end = table->entries + table->cap;
+
+    for (struct table_entry *entry = table->entries; entry < end; ++entry) {
+        free((void *) entry->key); // all these strings are malloc'd
+    }
+
+    free(table);
+}
+
+struct hashtable_iter hashtable_iter_start(const struct hashtable *const table) {
+    return (struct hashtable_iter) {
+        ._table = table,
+        ._current = table ? table->entries : NULL,
+    };
+}
+
+bool hashtable_iter_next(struct hashtable_iter *const iter, const char **const key, uintmax_t *const value) {
+    assert(iter);
+
+    const struct hashtable *const ht = iter->_table;
+    const struct table_entry *cell = iter->_current;
+
+    if (!ht || !cell) {
+        goto iter_end;
+    }
+
+    const struct table_entry *const end = ht->entries + ht->cap;
+    if (cell >= end) {
+        goto iter_end;
+    }
+
+    // skip empty cells
+    while (!cell->key) {
+        if (++cell >= end) {
+            goto iter_end;
+        }
+    }
+
+    if (key) {
+        *key = cell->key;
+    }
+
+    if (value) {
+        *value = cell->value;
+    }
+
+    iter->_current = cell + 1;
+
+    return true;
+
+iter_end:
+    iter->_current = NULL;
+
+    return false;
+}
+
+bool hashtable_contains(const struct hashtable *const table, const char *const key) {
+    return hashtable_get(table, key);
+}
+
+const uintmax_t *hashtable_get(const struct hashtable *const table, const char *const key) {
+    return hashtable_get_entry(table, key, &(struct hashtable_entry) { 0 });
+}
+
+const uintmax_t *hashtable_get_entry(
+    const struct hashtable *const table,
+    const char *const key,
+    struct hashtable_entry *const entry
+) {
+    assert(entry);
+
+    // we know as a fact we aren't going to edit the table and that we are the only one able to allocate new tables
+    // we can thus cast away constness without ever incurring in UB
+    const struct table_entry *const table_entry = hash_get_entry((struct hashtable *) table, key);
+    if (!table_entry) {
+        return NULL;
+    }
+
+    *entry = (struct hashtable_entry) {
+        .key = table_entry->key,
+        .value = table_entry->value,
+    };
+
+    return &table_entry->value;
+}
+
+bool hashtable_remove(struct hashtable *table, const char *const key) {
+    // remove is simple: just set the key to NULL and return the value
+    // the entry will be reused when a new key is added, or skipped if the table is rehashed
+    // during search the entry will be skipped if the key is NULL
+
+    struct table_entry *const entry = hash_get_entry(table, key);
+    if (!entry) {
+        return false;
+    }
+
+    assert(table->len);
+
+    free((void *) entry->key); // the key is malloc'd
+
+    entry->key = NULL;
+    entry->value = 0;
+
+    --table->len;
+
+    // leave the next offset as is, this cell is now a free cell and will be reused when a new key is added
+
+    return true;
+}
+
+enum hash_set_result hashtable_set(
+    struct hashtable **table_ptr,
+    const char *const key,
+    const uintmax_t value,
+    uintmax_t *const old_value
+) {
+    return hash_set(table_ptr, (struct maybe_owned_str) { .str = (char *) key, .owned = false }, value, old_value);
+}
+
+uint32_t hashtable_size(const struct hashtable *const table) {
+    return table ? table->len : 0;
+}
