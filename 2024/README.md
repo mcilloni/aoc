@@ -14,4 +14,5 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 - Day 11: C
 - Day 12: Julia
 - Day 13: Powershell
+- Day 14: Zig
 
