@@ -1,0 +1,16 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/18
+18.so
+18.dylib
+18.dll
+18.a
+18.lib
+18-test-*
+*.exe
+*.pdb
+*.o
+*.obj
+*.lst
