@@ -18,4 +18,5 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 - Day 15: Scala
 - Day 16: Vala
 - Day 17: PHP
+- Day 18: D
 
