@@ -20,4 +20,5 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 - Day 17: PHP
 - Day 18: D
 - Day 19: Ruby
+- Day 20: Go
 
