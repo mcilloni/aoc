@@ -23,4 +23,5 @@ Solutions of all AoC 2024 problems in different languages (warning: it sure as h
 - Day 20: Go
 - Day 21: Swift
 - Day 22: Perl
+- Day 23: Nim
 
