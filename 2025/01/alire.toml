@@ -1,0 +1,12 @@
+name = "p01"
+description = "AoC 2025 Day 1"
+version = "0.1.0-dev"
+
+authors = ["Marco Cilloni"]
+maintainers = ["Marco Cilloni <m.c.cilloni@gmail.com>"]
+maintainers-logins = ["mcilloni"]
+licenses = "BSD-2-Clause"
+website = ""
+tags = []
+
+executables = ["p01"]
