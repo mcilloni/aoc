@@ -4,5 +4,5 @@ Solutions of all AoC 2025 problems in different languages (warning: it sure as h
 - Day 1: Ada
 - Day 2: Tcl
 - Day 3: Zig
-
+- Day 4: Visual Basic (.NET)
 
