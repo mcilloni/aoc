@@ -6,4 +6,5 @@ Solutions of all AoC 2025 problems in different languages (warning: it sure as h
 - Day 3: Zig
 - Day 4: Visual Basic (.NET)
 - Day 5: Erlang
+- Day 6: Haskell
 
