@@ -1,0 +1,20 @@
+(lang dune 3.20)
+
+(name p06)
+
+(generate_opam_files true)
+
+(source
+ (github mcilloni/aoc))
+
+(authors "Marco Cilloni <m.c.cilloni@gmail.com>")
+
+(license BSD-2-Clause)
+
+(package
+ (name p06)
+ (synopsis "AoC 2025 Day 06")
+ (description "Solutions for Advent of Code 2025 Day 06 implemented in OCaml.")
+ (depends ocaml)
+ (tags
+  ("aoc" "adventofcode" "2025" "ocaml" "day 06")))
