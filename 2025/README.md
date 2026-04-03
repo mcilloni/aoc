@@ -9,3 +9,4 @@ Solutions of all AoC 2025 problems in different languages (warning: it sure as h
 - Day 6: OCaml
 - Day 7: Haskell
 - Day 8: D
+- Day 9: Julia
